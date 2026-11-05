@@ -566,6 +566,7 @@ dependencies = [
  "gpui_web",
  "gpui_wgpu",
  "image",
+ "objc2 0.6.3",
  "wasm-bindgen",
  "web-time",
  "wgpu",

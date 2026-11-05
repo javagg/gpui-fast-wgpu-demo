@@ -5,8 +5,8 @@ own menus and dialogs above it. On the desktop it uses gpui-fast's public API on
 
 ```text
 front  GPUI overlay     deferred draws: HUD, menus, dialogs
-       wgpu swap chain  its own DX12 device, on its own thread
-back   GPUI base        the root view: toolbar and panels (D3D11)
+       wgpu swap chain  its own DX12 or Metal device, on its own thread
+back   GPUI base        the root view: toolbar and panels (D3D11 or Metal)
 ```
 
 The part to read is `src/viewport.rs`.
@@ -24,6 +24,57 @@ target\release\cad_viewport.exe --offscreen out     (no window: PNGs, picking, f
 
 `tools\run_test.cmd` runs a scripted session and saves screenshots and
 measurements to `test-output`.
+
+## On macOS
+
+The desktop path also builds and runs there, on Metal: the same UI, tabs,
+picking and render thread, with `src/viewport_macos.rs` in place of
+`src/viewport.rs`.
+
+```text
+cargo run --release -- --spin --array 30 --exit-after 14
+cargo run --release -- --offscreen out
+```
+
+gpui-fast's macOS native surface is a layer-backed `NSView`, whose pointer
+`platform_handle` returns as a `usize`. The viewport puts a `CAMetalLayer` on
+it and gives that to wgpu as a `SurfaceTargetUnsafe::CoreAnimationLayer`. Two
+things this path needs that Windows doesn't:
+
+- No commit. A `CAMetalLayer` presents by itself, so `commit_composition` does
+  nothing, and `set_visible` hides a tab properly instead of the empty-bounds
+  workaround.
+- `font-kit`. GPUI's text backend on macOS is behind that feature, and the
+  crate builds with `default-features = false`, so without it GPUI draws every
+  quad and no glyph at all: the UI comes up with blank buttons and an empty
+  assembly tree.
+
+Two things are about this machine rather than macOS:
+
+- `gpui_apple`'s build script compiles `shaders.metal` with `xcrun metal`, which
+  Command Line Tools alone don't provide. Either install Xcode, or build with
+  `--features gpui_platform/runtime_shaders` to compile them at runtime instead.
+- Fetching the pinned wgpu revision needs a GitHub git clone. Where that is too
+  slow, put the same revision in `vendor/wgpu` and point the build at it:
+
+  ```text
+  curl -LO https://codeload.github.com/gfx-rs/wgpu/tar.gz/<rev>
+  mkdir -p vendor/wgpu && tar xzf wgpu.tar.gz -C vendor/wgpu --strip-components=1
+  ```
+
+  ```toml
+  [patch."https://github.com/gfx-rs/wgpu"]
+  wgpu = { path = "vendor/wgpu/wgpu" }
+  ```
+
+  `vendor/wgpu` is git-ignored; drop the table to go back to the git source.
+
+An occluded window is worth knowing about: when another window covers this one
+completely, macOS stops handing out drawables and the render thread idles, which
+is also why a hidden tab costs nothing.
+
+Measured on an M1 Max at 1796x1522 with MSAA 4x: 104 fps in the viewport, and
+`--offscreen` reports 5.7 ms per frame for 5,378,000 triangles in a 10x10 array.
 
 ## In a browser
 

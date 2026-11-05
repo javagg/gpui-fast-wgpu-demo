@@ -251,6 +251,23 @@ impl RenderHost {
         surface.configure(&self.device, &self.config);
         Ok(surface)
     }
+
+    /// Creates a tab's surface on macOS, where GPUI's native surface is a
+    /// layer-backed `NSView` and wgpu renders into the `CAMetalLayer` put on
+    /// it. The layer presents on its own, so unlike Windows this needs no
+    /// commit of a composition GPUI owns.
+    #[cfg(target_os = "macos")]
+    pub fn create_surface(&self, layer: *mut std::ffi::c_void) -> Result<wgpu::Surface<'static>> {
+        // SAFETY: wgpu takes its own reference to the layer and holds it for as
+        // long as the surface lives.
+        let surface = unsafe {
+            self.instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer))
+        }
+        .context("creating a wgpu surface on the CAMetalLayer")?;
+        surface.configure(&self.device, &self.config);
+        Ok(surface)
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -265,8 +282,13 @@ impl Drop for RenderHost {
 
 #[cfg(not(target_family = "wasm"))]
 fn create_device() -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+    // The backend GPUI itself renders with on this platform.
+    #[cfg(target_os = "windows")]
+    const BACKENDS: wgpu::Backends = wgpu::Backends::DX12;
+    #[cfg(target_os = "macos")]
+    const BACKENDS: wgpu::Backends = wgpu::Backends::METAL;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::DX12,
+        backends: BACKENDS,
         flags: wgpu::InstanceFlags::default(),
         backend_options: wgpu::BackendOptions::default(),
         memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
@@ -278,7 +300,7 @@ fn create_device() -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu:
         force_fallback_adapter: false,
         apply_limit_buckets: false,
     }))
-    .context("requesting a DX12 adapter")?;
+    .context("requesting an adapter")?;
     let (device, queue) = gpui::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("cad_viewport"),
         required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),

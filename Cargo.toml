@@ -10,11 +10,13 @@ description = "A custom GPUI Element whose content is rendered directly by wgpu,
 # workspace of its own, so it has to be excluded from this one even though it
 # sits inside this directory.
 [workspace]
-exclude = ["vendor/gpui-fast"]
+exclude = ["vendor/gpui-fast", "vendor/wgpu"]
 
 [dependencies]
 gpui = { path = "vendor/gpui-fast/crates/gpui", default-features = false }
-gpui_platform = { path = "vendor/gpui-fast/crates/gpui_platform", default-features = false }
+# font-kit is the text backend on macOS; it forwards to gpui_macos only, so it
+# costs nothing on the other platforms.
+gpui_platform = { path = "vendor/gpui-fast/crates/gpui_platform", default-features = false, features = ["font-kit"] }
 # The revision gpui-fast pins, so the renderer on Linux and this crate agree.
 wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007" }
 anyhow = "1"
@@ -30,6 +32,11 @@ gpui_web = { path = "vendor/gpui-fast/crates/gpui_web", default-features = false
 gpui_wgpu = { path = "vendor/gpui-fast/crates/gpui_wgpu" }
 wasm-bindgen = "0.2"
 web-time = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The native surface handle is an `NSView` pointer; the viewport gives it a
+# `CAMetalLayer` for wgpu to render into.
+objc2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Must be the version gpui_windows uses: the native surface handle is handed

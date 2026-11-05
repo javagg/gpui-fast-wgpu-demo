@@ -14,30 +14,57 @@
 // Parts of the renderer only the desktop's render thread uses.
 #![cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
 
-#[cfg(not(any(target_os = "windows", target_family = "wasm")))]
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_family = "wasm"
+)))]
 fn main() {
     eprintln!(
-        "This demo attaches wgpu to a DirectComposition visual on Windows, and runs in a browser. \
-         gpui-fast's native_webview example shows the Linux surface handle."
+        "This demo attaches wgpu to a DirectComposition visual on Windows, to a CAMetalLayer on \
+         macOS, and runs in a browser. gpui-fast's native_webview example shows the Linux surface handle."
     );
 }
 
-#[cfg(any(target_os = "windows", target_family = "wasm"))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_family = "wasm"
+))]
 mod camera;
-#[cfg(any(target_os = "windows", target_family = "wasm"))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_family = "wasm"
+))]
 mod render;
-#[cfg(any(target_os = "windows", target_family = "wasm"))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_family = "wasm"
+))]
 mod scene;
-#[cfg(any(target_os = "windows", target_family = "wasm"))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_family = "wasm"
+))]
 mod ui;
 #[cfg(target_os = "windows")]
+mod viewport;
+#[cfg(target_os = "macos")]
+#[path = "viewport_macos.rs"]
 mod viewport;
 #[cfg(target_family = "wasm")]
 #[path = "viewport_web.rs"]
 mod viewport;
 
 /// `std::time::Instant` panics in a browser.
-#[cfg(any(target_os = "windows", target_family = "wasm"))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_family = "wasm"
+))]
 mod time {
     #[cfg(not(target_family = "wasm"))]
     pub use std::time::{Duration, Instant};
@@ -45,7 +72,7 @@ mod time {
     pub use web_time::{Duration, Instant};
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn main() {
     app::run();
 }
@@ -56,7 +83,7 @@ pub fn start() {
     viewport::run();
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod app {
     use std::cell::Cell;
     use std::rc::Rc;
