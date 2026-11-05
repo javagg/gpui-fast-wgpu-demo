@@ -95,7 +95,8 @@ The `wasm-bindgen` command line must match the `wasm-bindgen` crate in `Cargo.lo
 `tools\test_web.ps1` drives the page in headless Edge; add `-Software` where no GPU
 process is available, which also means WebGL2 rather than WebGPU.
 
-This needs `WebPlatform::wgpu_context`, which gpui-fast doesn't have yet (see
+This needs `WebPlatform::wgpu_context`, which gpui-fast doesn't have yet (filed as
+[longbridge/gpui-fast#102](https://github.com/longbridge/gpui-fast/pull/102); see
 `docs/upstream-issues.md`), so `tools\build_web.ps1` applies
 `patches\gpui-fast-web-wgpu-context.patch` to the submodule, and git then shows the
 submodule as modified.

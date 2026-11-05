@@ -1,8 +1,15 @@
 # Issues to raise with gpui-fast
 
-Not filed yet. Found against [longbridge/gpui-fast](https://github.com/longbridge/gpui-fast)
+Issues 1 and 2 are not filed yet. Issue 3 is filed as
+[longbridge/gpui-fast#102](https://github.com/longbridge/gpui-fast/pull/102), an
+open pull request with the change described below. All three were found against
+[longbridge/gpui-fast](https://github.com/longbridge/gpui-fast)
 at commit `86a8228`, the revision of the `vendor/gpui-fast` submodule. Check that they
 still apply before filing.
+
+Issue 1 and 2 are Windows-only, and issue 3 is web-only: on macOS none of them
+apply, since `set_visible` works there and a `CAMetalLayer` presents without a
+composition to commit.
 
 ## 1. Native surfaces cannot be hidden or removed on Windows
 
@@ -57,10 +64,12 @@ when asked to bind external content.
 `WebPlatform` keeps that context private, as the commit that added the type (#99) says.
 So the feature is out of reach unless the application replaces the platform.
 
-**Proposed change.** A public accessor, about three lines plus hooks. It lives in
-`patches/gpui-fast-web-wgpu-context.patch`, which `tools/build_web.ps1` applies to the
-submodule, and is written to the fork's conventions: `crates/gpui_web/src/fast/mod.rs`,
-with `mod fast;` in `gpui_web.rs` and `pub(crate)` on the field in `platform.rs`.
+**Proposed change, filed as #102.** A public accessor, three lines plus hooks.
+`patches/gpui-fast-web-wgpu-context.patch` carries it, applied to the submodule by
+`tools/build_web.ps1`, and is written to the fork's conventions: the logic in
+`crates/gpui_web/src/fast/wgpu_context.rs` behind a `fast/mod.rs`, a `mod fast;` hook in
+`gpui_web.rs`, `pub(crate)` on the field in `platform.rs`, and the accessor listed in
+`docs/upstream-sync.md` as a second exception to its no-new-public-API rule.
 
 ```rust
 impl WebPlatform {

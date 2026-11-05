@@ -1,41 +1,27 @@
 diff --git a/crates/gpui_web/src/fast/mod.rs b/crates/gpui_web/src/fast/mod.rs
 new file mode 100644
-index 0000000..3eab2f7
---- /dev/null
-+++ b/crates/gpui_web/src/fast/mod.rs
-@@ -0,0 +1,14 @@
-+//! gpui-fast's additions to the web platform.
-+
-+use gpui_wgpu::WgpuContext;
-+
-+use crate::WebPlatform;
-+
-+impl WebPlatform {
-+    /// The context drawing this platform's window, once graphics have been
-+    /// initialized: from the moment the application finishes launching. Lets
-+    /// an application allocate a `WgpuDynamicTexture` that GPUI can sample.
-+    pub fn wgpu_context(&self) -> Option<WgpuContext> {
-+        self.wgpu_context.borrow().clone()
-+    }
-+}
+index 0000000..0000000
+diff --git a/crates/gpui_web/src/fast/wgpu_context.rs b/crates/gpui_web/src/fast/wgpu_context.rs
+new file mode 100644
+index 0000000..0000000
 diff --git a/crates/gpui_web/src/gpui_web.rs b/crates/gpui_web/src/gpui_web.rs
-index c915084..4276bf5 100644
+index 0000000..0000000
 --- a/crates/gpui_web/src/gpui_web.rs
 +++ b/crates/gpui_web/src/gpui_web.rs
-@@ -7,6 +7,8 @@ pub mod canvas_fallback;
- 
- pub use canvas_fallback::CanvasFontFallback;
- 
+@@ -15,6 +15,8 @@
+ mod display;
+ #[cfg(target_family = "wasm")]
+ mod events;
 +#[cfg(target_family = "wasm")]
 +mod fast;
- #[cfg(target_family = "wasm")]
- mod canvas_text;
+ #[cfg(any(target_family = "wasm", test))]
+ mod glyph_cache;
  #[cfg(target_family = "wasm")]
 diff --git a/crates/gpui_web/src/platform.rs b/crates/gpui_web/src/platform.rs
-index b496aa4..3e06390 100644
+index 0000000..0000000
 --- a/crates/gpui_web/src/platform.rs
 +++ b/crates/gpui_web/src/platform.rs
-@@ -39,7 +39,7 @@ pub struct WebPlatform {
+@@ -39,7 +39,7 @@
      active_display: Rc<dyn PlatformDisplay>,
      callbacks: RefCell<WebPlatformCallbacks>,
      backend_preference: WebBackendPreference,
@@ -44,3 +30,22 @@ index b496aa4..3e06390 100644
      prepared_window: Rc<RefCell<Option<PreparedWebWindow>>>,
      window_lifecycle: Rc<Cell<WebWindowLifecycle>>,
      cursor_visible: Rc<Cell<bool>>,
+diff --git a/docs/upstream-sync.md b/docs/upstream-sync.md
+index 0000000..0000000
+--- a/docs/upstream-sync.md
++++ b/docs/upstream-sync.md
+@@ -69,6 +69,14 @@
+    `fast::dynamic_textures` exception. Everything else is `pub(crate)`, and the
+    module adds no rendering behavior an app could observe without calling the
+    new methods.
++   A second exception is `gpui_web`'s `fast::wgpu_context`
++   (longbridge/gpui-fast#99): a browser page has no window composition, so a
++   wgpu-rendered element there can only reach the screen by drawing during
++   `paint` into a `WgpuDynamicTexture` allocated from the context that draws
++   the window. `WebPlatform` keeps that context private, which leaves the
++   feature unreachable to an application that does not replace the platform.
++   The addition is one accessor returning a clone of the `Rc` it already
++   holds, and nothing else about the web platform becomes public.
+ 6. **New files only inside `fast/`, or in our own crates** such as
+    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
+    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
