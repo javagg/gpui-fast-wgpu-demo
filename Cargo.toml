@@ -1,0 +1,40 @@
+[package]
+name = "cad_viewport"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A custom GPUI Element whose content is rendered directly by wgpu, with GPUI overlays above it"
+
+# Stand-alone on purpose: this crate uses gpui-fast's public API only, so it
+# shows what an application can do without patching the fork.
+[workspace]
+
+[dependencies]
+gpui = { path = "../gpui-fast/crates/gpui", default-features = false }
+gpui_platform = { path = "../gpui-fast/crates/gpui_platform", default-features = false }
+# The revision gpui-fast pins, so the renderer on Linux and this crate agree.
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007" }
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+futures = "0.3"
+glam = { version = "0.30", features = ["bytemuck"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Must be the version gpui_windows uses: the native surface handle is handed
+# out as this crate's `IUnknown` and recovered with `Any::downcast`.
+windows = { version = "0.62", features = ["Win32_Graphics_DirectComposition"] }
+
+# Workspace patches do not apply across workspaces, so gpui-fast's are repeated.
+[patch.crates-io]
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+calloop = { git = "https://github.com/zed-industries/calloop" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+
+[profile.release]
+opt-level = 3
+debug = "line-tables-only"
+incremental = true
+codegen-units = 16

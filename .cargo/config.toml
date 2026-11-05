@@ -1,0 +1,13 @@
+# libgit2 fails certificate revocation checks behind a local proxy, where
+# the git command line succeeds.
+[net]
+git-fetch-with-cli = true
+
+# The same flags gpui-fast builds with on Windows.
+[target.'cfg(target_os = "windows")']
+rustflags = [
+    "--cfg",
+    "windows_slim_errors",
+    "-C",
+    "target-feature=+crt-static",
+]
