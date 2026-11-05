@@ -6,12 +6,15 @@ publish = false
 description = "A custom GPUI Element whose content is rendered directly by wgpu, with GPUI overlays above it"
 
 # Stand-alone on purpose: this crate uses gpui-fast's public API only, so it
-# shows what an application can do without patching the fork.
+# shows what an application can do without patching the fork. gpui-fast is a
+# workspace of its own, so it has to be excluded from this one even though it
+# sits inside this directory.
 [workspace]
+exclude = ["vendor/gpui-fast"]
 
 [dependencies]
-gpui = { path = "../gpui-fast/crates/gpui", default-features = false }
-gpui_platform = { path = "../gpui-fast/crates/gpui_platform", default-features = false }
+gpui = { path = "vendor/gpui-fast/crates/gpui", default-features = false }
+gpui_platform = { path = "vendor/gpui-fast/crates/gpui_platform", default-features = false }
 # The revision gpui-fast pins, so the renderer on Linux and this crate agree.
 wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007" }
 anyhow = "1"

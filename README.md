@@ -45,5 +45,6 @@ $env:CARGO_HOME = "D:\workspaces\dev9\works\gpwgpu\.cargo-home"
 cargo build --release
 ```
 
-Elsewhere a plain `cargo build --release` should do, with `..\gpui-fast` beside
-this directory.
+Elsewhere a plain `cargo build --release` should do. gpui-fast is a submodule
+in `vendor\gpui-fast`, so clone with `git clone --recurse-submodules`, or run
+`git submodule update --init` in an existing clone.
