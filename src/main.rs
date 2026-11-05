@@ -41,9 +41,8 @@ mod app {
     use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
     use gpui_platform::application;
 
-    use crate::render::{DisplayMode, RenderOptions};
+    use crate::render::{DisplayMode, RenderHost};
     use crate::ui::{CadApp, CadAppOptions, RunMetrics};
-    use crate::viewport::Viewport;
 
     struct Args {
         array: u32,
@@ -114,22 +113,15 @@ mod app {
                     let model = model.clone();
                     let metrics = metrics.clone();
                     move |window, cx| {
-                        let viewport = Viewport::new(
-                            window,
-                            model.clone(),
-                            ui_sender,
-                            RenderOptions {
-                                array: args.array,
-                                spin: args.spin,
-                                mode: args.mode,
-                            },
-                        )
-                        .expect("creating the wgpu viewport");
-                        println!("adapter: {}", viewport.adapter);
+                        let host = Rc::new(
+                            RenderHost::new(ui_sender).expect("creating the wgpu device"),
+                        );
+                        println!("adapter: {}", host.adapter);
                         cx.new(|cx| {
                             CadApp::new(
-                                viewport,
+                                host,
                                 model,
+                                Arc::new(crate::scene::flange()),
                                 ui_receiver,
                                 CadAppOptions {
                                     array: args.array,

@@ -1,12 +1,13 @@
-//! The render thread: owns the wgpu device and draws the viewport.
+//! The render thread: one wgpu device, drawing every tab's viewport.
 //!
-//! Nothing here touches GPUI. The UI thread sends [`Cmd`]s and receives
+//! Nothing here touches GPUI. The UI thread sends [`Msg`]s and receives
 //! [`UiEvent`]s, and neither thread waits on the other, so a frame that takes
-//! a second to draw never delays a GPUI frame, and the viewport keeps its own
-//! frame rate, down to none at all when nothing changes.
+//! a second to draw never delays a GPUI frame, and each viewport keeps its own
+//! frame rate, down to none at all when nothing changes or its tab is hidden.
 
 use std::num::NonZeroU64;
 use std::sync::{Arc, mpsc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -89,7 +90,36 @@ pub enum Cmd {
     SetSpin(bool),
     /// Selects a part of the first assembly; `None` clears the selection.
     SelectPart(Option<usize>),
+    /// Shows or hides the tab. A hidden tab draws nothing and gives up its
+    /// MSAA and depth targets; its swap chain keeps the last frame, so showing
+    /// it again needs no new frame unless something changed.
+    SetVisible(bool),
+}
+
+pub type TabId = u32;
+
+pub enum Msg {
+    AddTab {
+        id: TabId,
+        surface: wgpu::Surface<'static>,
+        scene: TabScene,
+    },
+    RemoveTab(TabId),
+    Tab(TabId, Cmd),
     Shutdown,
+}
+
+/// What a tab shows and how it starts out.
+pub struct TabScene {
+    pub model: Arc<Model>,
+    pub array: u32,
+    pub spin: bool,
+    pub mode: DisplayMode,
+    pub projection: Projection,
+    pub preset: ViewPreset,
+    /// A flat sheet rather than a 3D view: dragging pans, the view stays
+    /// fixed, and a drawing frame replaces the ground grid.
+    pub planar: bool,
 }
 
 /// A part of one of the assemblies in the array.
@@ -151,33 +181,91 @@ pub enum UiEvent {
     CommitComposition,
 }
 
-/// What must be created on the UI thread: the surface, whose first configure
-/// attaches a swap chain to the DirectComposition visual GPUI owns.
-pub struct Gpu {
-    /// `None` when rendering off screen, in `--offscreen`.
-    pub surface: Option<wgpu::Surface<'static>>,
-    pub adapter: wgpu::Adapter,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub config: wgpu::SurfaceConfiguration,
+/// The UI thread's side of the renderer: the device every tab's surface is
+/// created on, and the channel to the render thread.
+pub struct RenderHost {
+    instance: wgpu::Instance,
+    device: wgpu::Device,
+    config: wgpu::SurfaceConfiguration,
+    commands: mpsc::Sender<Msg>,
+    thread: Option<JoinHandle<()>>,
+    pub adapter: String,
 }
 
-#[cfg(target_os = "windows")]
-pub fn create_gpu(
-    visual: &windows::Win32::Graphics::DirectComposition::IDCompositionVisual,
-) -> Result<Gpu> {
-    use windows::core::Interface as _;
-
-    let instance = dx12_instance();
-    // SAFETY: wgpu takes its own reference to the visual and holds it for as
-    // long as the surface lives.
-    let surface = unsafe {
-        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual.as_raw()))
+impl RenderHost {
+    pub fn new(ui: UnboundedSender<(TabId, UiEvent)>) -> Result<Self> {
+        let (instance, adapter, device, queue) = create_device()?;
+        let config = surface_config();
+        let (commands, receiver) = mpsc::channel();
+        let thread = std::thread::Builder::new().name("wgpu-viewport".into()).spawn({
+            let (device, config) = (device.clone(), config.clone());
+            move || {
+                report_device_errors(&device, ui.clone());
+                // Compiling pipelines happens here, off the UI thread.
+                let shared = Shared::new(device, queue, config);
+                render_thread(shared, receiver, ui);
+            }
+        })?;
+        Ok(Self {
+            instance,
+            device,
+            config,
+            commands,
+            thread: Some(thread),
+            adapter: adapter_summary(&adapter),
+        })
     }
-    .context("creating a wgpu surface on the composition visual")?;
+
+    pub fn send(&self, msg: Msg) {
+        self.commands.send(msg).ok();
+    }
+
+    pub fn sender(&self) -> mpsc::Sender<Msg> {
+        self.commands.clone()
+    }
+
+    /// Creates a tab's surface. This has to happen on the UI thread: the first
+    /// configure attaches a swap chain to a DirectComposition visual GPUI owns,
+    /// and the caller then has GPUI commit it.
+    #[cfg(target_os = "windows")]
+    pub fn create_surface(
+        &self,
+        visual: &windows::Win32::Graphics::DirectComposition::IDCompositionVisual,
+    ) -> Result<wgpu::Surface<'static>> {
+        use windows::core::Interface as _;
+
+        // SAFETY: wgpu takes its own reference to the visual and holds it for
+        // as long as the surface lives.
+        let surface = unsafe {
+            self.instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual.as_raw()))
+        }
+        .context("creating a wgpu surface on the composition visual")?;
+        surface.configure(&self.device, &self.config);
+        Ok(surface)
+    }
+}
+
+impl Drop for RenderHost {
+    fn drop(&mut self) {
+        self.send(Msg::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok();
+        }
+    }
+}
+
+fn create_device() -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::DX12,
+        flags: wgpu::InstanceFlags::default(),
+        backend_options: wgpu::BackendOptions::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        display: None,
+    });
     let adapter = gpui::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&surface),
+        compatible_surface: None,
         force_fallback_adapter: false,
         apply_limit_buckets: false,
     }))
@@ -188,18 +276,14 @@ pub fn create_gpu(
         ..Default::default()
     }))
     .context("creating the wgpu device")?;
+    Ok((instance, adapter, device, queue))
+}
 
-    let capabilities = surface.get_capabilities(&adapter);
-    let format = capabilities
-        .formats
-        .iter()
-        .copied()
-        .find(|format| *format == wgpu::TextureFormat::Bgra8UnormSrgb)
-        .or_else(|| capabilities.formats.iter().copied().find(|format| format.has_srgb_suffix()))
-        .context("the surface has no sRGB format")?;
-    let config = wgpu::SurfaceConfiguration {
+fn surface_config() -> wgpu::SurfaceConfiguration {
+    wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
+        // wgpu's DX12 backend offers this on every surface.
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
         width: 1,
         height: 1,
         // vsync blocks only the render thread.
@@ -208,30 +292,68 @@ pub fn create_gpu(
         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
         color_space: wgpu::SurfaceColorSpace::Auto,
         view_formats: Vec::new(),
-    };
-    surface.configure(&device, &config);
-    Ok(Gpu {
-        surface: Some(surface),
-        adapter,
-        device,
-        queue,
-        config,
-    })
+    }
 }
 
-fn dx12_instance() -> wgpu::Instance {
-    wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::DX12,
-        flags: wgpu::InstanceFlags::default(),
-        backend_options: wgpu::BackendOptions::default(),
-        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        display: None,
-    })
+/// wgpu's default handler panics, which would silently end the render thread.
+fn report_device_errors(device: &wgpu::Device, ui: UnboundedSender<(TabId, UiEvent)>) {
+    device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+        eprintln!("wgpu error: {error}");
+        ui.unbounded_send((0, UiEvent::Failed(error.to_string()))).ok();
+    }));
 }
 
 pub fn adapter_summary(adapter: &wgpu::Adapter) -> String {
     let info = adapter.get_info();
     format!("{} ({:?})", info.name, info.backend)
+}
+
+/// What all tabs share: compiling pipelines once is what makes a new tab cheap.
+#[derive(Clone)]
+struct Shared {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    layout: wgpu::BindGroupLayout,
+    pipelines: Arc<Pipelines>,
+}
+
+impl Shared {
+    fn new(device: wgpu::Device, queue: wgpu::Queue, config: wgpu::SurfaceConfiguration) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("globals"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<Globals>() as u64),
+                },
+                count: None,
+            }],
+        });
+        let pipelines = Arc::new(create_pipelines(&device, &layout, config.format));
+        Self {
+            device,
+            queue,
+            config,
+            layout,
+            pipelines,
+        }
+    }
+}
+
+/// A tab's handle on the channel to the UI thread.
+struct TabEvents {
+    tab: TabId,
+    sender: UnboundedSender<(TabId, UiEvent)>,
+}
+
+impl TabEvents {
+    fn unbounded_send(&self, event: UiEvent) -> Result<(), ()> {
+        self.sender.unbounded_send((self.tab, event)).map_err(|_| ())
+    }
 }
 
 #[repr(C)]
@@ -292,9 +414,9 @@ struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    ui: UnboundedSender<UiEvent>,
+    ui: TabEvents,
 
-    pipelines: Pipelines,
+    pipelines: Arc<Pipelines>,
     main_uniforms: UniformBlock,
     triad_uniforms: UniformBlock,
     pick_uniforms: UniformBlock,
@@ -328,6 +450,9 @@ struct Renderer {
     model_time: f32,
     last_frame: Instant,
     dirty: bool,
+    visible: bool,
+    planar: bool,
+    preset: ViewPreset,
 
     press: Option<Press>,
     hover_request: Option<(f32, f32, f32, f32)>,
@@ -575,36 +700,28 @@ fn triad_vertices() -> Vec<LineVertex> {
 }
 
 impl Renderer {
-    fn new(gpu: Gpu, model: Arc<Model>, ui: UnboundedSender<UiEvent>, array: u32, spin: bool, mode: DisplayMode) -> Self {
-        let Gpu {
-            surface,
+    fn new(
+        shared: &Shared,
+        surface: Option<wgpu::Surface<'static>>,
+        ui: TabEvents,
+        scene: TabScene,
+    ) -> Self {
+        let Shared {
             device,
             queue,
             config,
-            ..
-        } = gpu;
-        // wgpu's default handler panics, which would silently end this thread.
-        device.on_uncaptured_error(Arc::new({
-            let ui = ui.clone();
-            move |error: wgpu::Error| {
-                eprintln!("wgpu error: {error}");
-                ui.unbounded_send(UiEvent::Failed(error.to_string())).ok();
-            }
-        }));
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<Globals>() as u64),
-                },
-                count: None,
-            }],
-        });
-        let pipelines = create_pipelines(&device, &layout, config.format);
+            layout,
+            pipelines,
+        } = shared.clone();
+        let TabScene {
+            model,
+            array,
+            spin,
+            mode,
+            projection,
+            preset,
+            planar,
+        } = scene;
         let main_uniforms = uniform_block(&device, &layout, "main_globals");
         let triad_uniforms = uniform_block(&device, &layout, "triad_globals");
         let pick_uniforms = uniform_block(&device, &layout, "pick_globals");
@@ -672,7 +789,7 @@ impl Renderer {
             yaw: 0.0,
             pitch: 0.0,
             distance: 1000.0,
-            projection: Projection::Perspective,
+            projection,
         };
         let now = Instant::now();
         let mut renderer = Self {
@@ -716,6 +833,9 @@ impl Renderer {
             model_time: 0.0,
             last_frame: now,
             dirty: true,
+            visible: true,
+            planar,
+            preset,
             press: None,
             hover_request: None,
             hovered: 0,
@@ -729,7 +849,7 @@ impl Renderer {
             reported_idle: false,
         };
         renderer.set_array(array);
-        renderer.camera = renderer.preset_camera(ViewPreset::Iso);
+        renderer.camera = renderer.preset_camera(preset);
         renderer
     }
 
@@ -789,7 +909,59 @@ impl Renderer {
         self.dirty = true;
     }
 
+    /// Replaces the ground grid with a drawing frame and title block around the
+    /// plan view, and takes the sheet as the bounds to fit the view to.
+    fn build_sheet(&mut self) {
+        const COLOR: [f32; 4] = [0.70, 0.80, 0.92, 1.0];
+        let (min, max) = self.bounds;
+        let center = (min + max) * 0.5;
+        let size = max - min;
+        // The proportions of an A-series sheet.
+        let half_height = (size.y * 0.5 + 70.0).max((size.x * 0.5 + 70.0) / std::f32::consts::SQRT_2);
+        let half_width = half_height * std::f32::consts::SQRT_2;
+        let (left, right) = (center.x - half_width, center.x + half_width);
+        let (bottom, top) = (center.y - half_height, center.y + half_height);
+        let margin = half_height * 0.04;
+
+        let mut vertices = Vec::new();
+        let mut segment = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            vertices.push(LineVertex { pos: [x0, y0, min.z], color: COLOR });
+            vertices.push(LineVertex { pos: [x1, y1, min.z], color: COLOR });
+        };
+        let mut rectangle = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            segment(x0, y0, x1, y0);
+            segment(x1, y0, x1, y1);
+            segment(x1, y1, x0, y1);
+            segment(x0, y1, x0, y0);
+        };
+        rectangle(left, bottom, right, top);
+        rectangle(left + margin, bottom + margin, right - margin, top - margin);
+        // The title block, in the bottom right corner, in three rows.
+        let (block_left, block_top) = (right - margin - half_width * 0.62, bottom + margin + half_height * 0.2);
+        let row = (block_top - bottom - margin) / 3.0;
+        rectangle(block_left, bottom + margin, right - margin, block_top);
+        rectangle(block_left, bottom + margin + row, right - margin, block_top - row);
+
+        self.bounds = (
+            Vec3::new(left, bottom, min.z),
+            Vec3::new(right, top, max.z),
+        );
+        self.grid_vertices = vertices.len() as u32;
+        self.grid_radius = 0.0;
+        self.grid_buffer = Some(static_buffer(
+            &self.device,
+            &self.queue,
+            "sheet",
+            wgpu::BufferUsages::VERTEX,
+            bytemuck::cast_slice(&vertices),
+        ));
+    }
+
     fn rebuild_grid(&mut self) {
+        if self.planar {
+            self.build_sheet();
+            return;
+        }
         let (min, max) = self.bounds;
         let center = (min + max) * 0.5;
         let radius = self.scene_radius() * 2.6;
@@ -857,6 +1029,16 @@ impl Renderer {
         let aspect = self.aspect();
         let radius = self.scene_radius();
         let half_fov = 17.5f32.to_radians();
+        if self.planar {
+            // A sheet seen square on can fill the view, unlike a sphere.
+            let size = self.bounds.1 - self.bounds.0;
+            let half_height = (size.y * 0.5).max(size.x * 0.5 / aspect) * 1.05;
+            return Camera {
+                target: (self.bounds.0 + self.bounds.1) * 0.5,
+                distance: half_height / half_fov.tan(),
+                ..self.camera
+            };
+        }
         // The narrower of the two view directions has to hold the sphere.
         let half = if aspect < 1.0 { (half_fov.tan() * aspect).atan() } else { half_fov };
         Camera {
@@ -875,24 +1057,17 @@ impl Renderer {
     }
 
     fn wants_frame(&self) -> bool {
-        self.ready() && (self.dirty || self.spin || self.glide.is_some())
+        self.visible && self.ready() && (self.dirty || self.spin || self.glide.is_some())
     }
 
-    fn resize(&mut self, width: u32, height: u32) {
-        let (width, height) = (width.max(1), height.max(1));
-        if (width, height) == (self.config.width, self.config.height) {
+    /// Allocates the MSAA and depth targets, given up while the tab is hidden.
+    fn ensure_targets(&mut self) {
+        if self.msaa.is_some() {
             return;
         }
-        let was_ready = self.ready();
-        self.config.width = width;
-        self.config.height = height;
-        if let Some(surface) = &self.surface {
-            surface.configure(&self.device, &self.config);
-            self.commit_pending = true;
-        }
         let extent = wgpu::Extent3d {
-            width,
-            height,
+            width: self.config.width,
+            height: self.config.height,
             depth_or_array_layers: 1,
         };
         let attachment = |label, format| {
@@ -911,14 +1086,44 @@ impl Renderer {
         };
         self.msaa = Some(attachment("msaa", self.config.format));
         self.depth = Some(attachment("depth", DEPTH_FORMAT));
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+        self.last_frame = Instant::now();
+        if !visible {
+            self.msaa = None;
+            self.depth = None;
+            self.press = None;
+            self.hover_request = None;
+            if std::mem::take(&mut self.hovered) != 0 {
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        let (width, height) = (width.max(1), height.max(1));
+        if (width, height) == (self.config.width, self.config.height) {
+            return;
+        }
+        let was_ready = self.ready();
+        self.config.width = width;
+        self.config.height = height;
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+            self.commit_pending = true;
+        }
+        self.msaa = None;
+        self.depth = None;
         if !was_ready {
             // The first real size: frame the model for this aspect ratio.
-            self.camera = self.preset_camera(ViewPreset::Iso);
+            self.camera = self.preset_camera(self.preset);
         }
         self.dirty = true;
     }
 
-    fn apply(&mut self, cmd: Cmd) -> bool {
+    fn apply(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Resize { width, height } => self.resize(width, height),
             Cmd::Pointer(pointer) => self.pointer(pointer),
@@ -927,12 +1132,16 @@ impl Renderer {
                 self.dirty = true;
             }
             Cmd::SetProjection(projection) => {
-                self.camera.projection = projection;
-                self.dirty = true;
+                if !self.planar {
+                    self.camera.projection = projection;
+                    self.dirty = true;
+                }
             }
             Cmd::SetView(preset) => {
-                let to = self.preset_camera(preset);
-                self.glide = Some(Glide::new(self.camera, to));
+                if !self.planar {
+                    let to = self.preset_camera(preset);
+                    self.glide = Some(Glide::new(self.camera, to));
+                }
             }
             Cmd::Fit => {
                 let to = self.fitted_camera();
@@ -956,9 +1165,8 @@ impl Renderer {
                 self.selected = part.map_or(0, |part| PartRef { assembly: 0, part }.id());
                 self.dirty = true;
             }
-            Cmd::Shutdown => return false,
+            Cmd::SetVisible(visible) => self.set_visible(visible),
         }
-        true
     }
 
     fn pointer(&mut self, pointer: Pointer) {
@@ -967,7 +1175,7 @@ impl Renderer {
             PointerKind::Down(button) => {
                 self.ui.unbounded_send(UiEvent::ViewportPressed).ok();
                 self.press = Some(Press {
-                    pan: button == Button::Middle || pointer.shift,
+                    pan: self.planar || button == Button::Middle || pointer.shift,
                     start: position,
                     last: position,
                     moved: false,
@@ -1118,6 +1326,7 @@ impl Renderer {
         if self.instances_dirty {
             self.update_instances();
         }
+        self.ensure_targets();
         started
     }
 
@@ -1245,12 +1454,14 @@ impl Renderer {
                 pass.draw(0..self.grid_vertices, 0..1);
             }
 
-            let side = TRIAD_SIZE.min(self.config.width as f32).min(self.config.height as f32);
-            pass.set_viewport(8.0, self.config.height as f32 - side - 8.0, side, side, 0.0, 1.0);
-            pass.set_bind_group(0, &self.triad_uniforms.bind_group, &[]);
-            pass.set_pipeline(&self.pipelines.triad);
-            pass.set_vertex_buffer(0, self.triad_buffer.slice(..));
-            pass.draw(0..6, 0..1);
+            if !self.planar {
+                let side = TRIAD_SIZE.min(self.config.width as f32).min(self.config.height as f32);
+                pass.set_viewport(8.0, self.config.height as f32 - side - 8.0, side, side, 0.0, 1.0);
+                pass.set_bind_group(0, &self.triad_uniforms.bind_group, &[]);
+                pass.set_pipeline(&self.pipelines.triad);
+                pass.set_vertex_buffer(0, self.triad_buffer.slice(..));
+                pass.draw(0..6, 0..1);
+            }
         }
         encoder.finish()
     }
@@ -1382,35 +1593,65 @@ impl Renderer {
         self.encode_seconds_since_report = 0.0;
         self.last_report = Instant::now();
     }
+}
 
-    fn run(&mut self, commands: mpsc::Receiver<Cmd>) {
-        loop {
-            if !self.wants_frame() {
-                // Nothing to draw: report once and sleep until told otherwise.
-                if !self.reported_idle && self.ready() {
-                    self.report(true);
-                    self.reported_idle = true;
+fn render_thread(
+    shared: Shared,
+    commands: mpsc::Receiver<Msg>,
+    ui: UnboundedSender<(TabId, UiEvent)>,
+) {
+    let mut tabs: Vec<(TabId, Renderer)> = Vec::new();
+    // Returns false when it is time to stop.
+    let handle = |msg: Msg, tabs: &mut Vec<(TabId, Renderer)>| -> bool {
+        match msg {
+            Msg::AddTab { id, surface, scene } => {
+                let events = TabEvents {
+                    tab: id,
+                    sender: ui.clone(),
+                };
+                tabs.push((id, Renderer::new(&shared, Some(surface), events, scene)));
+            }
+            Msg::RemoveTab(id) => tabs.retain(|(tab, _)| *tab != id),
+            Msg::Tab(id, cmd) => {
+                if let Some((_, tab)) = tabs.iter_mut().find(|(tab, _)| *tab == id) {
+                    tab.apply(cmd);
                 }
-                match commands.recv() {
-                    Ok(cmd) => {
-                        if !self.apply(cmd) {
-                            return;
-                        }
+            }
+            Msg::Shutdown => return false,
+        }
+        true
+    };
+
+    loop {
+        if !tabs.iter().any(|(_, tab)| tab.wants_frame()) {
+            // Nothing to draw: report once and sleep until told otherwise.
+            for (_, tab) in &mut tabs {
+                if !tab.reported_idle && tab.visible && tab.ready() {
+                    tab.report(true);
+                    tab.reported_idle = true;
+                }
+            }
+            match commands.recv() {
+                Ok(msg) => {
+                    if !handle(msg, &mut tabs) {
+                        return;
                     }
-                    Err(_) => return,
                 }
+                Err(_) => return,
             }
-            while let Ok(cmd) = commands.try_recv() {
-                if !self.apply(cmd) {
-                    return;
-                }
+        }
+        while let Ok(msg) = commands.try_recv() {
+            if !handle(msg, &mut tabs) {
+                return;
             }
-            if self.wants_frame() {
-                self.reported_idle = false;
-                self.frame();
-                self.report(false);
+        }
+        for (_, tab) in &mut tabs {
+            if tab.wants_frame() {
+                tab.reported_idle = false;
+                tab.frame();
+                tab.report(false);
             }
-            self.service_hover();
+            tab.service_hover();
         }
     }
 }
@@ -1423,45 +1664,26 @@ pub fn run_offscreen(model: Arc<Model>, out_dir: &std::path::Path) -> Result<()>
     const HEIGHT: u32 = 800;
     std::fs::create_dir_all(out_dir)?;
 
-    let instance = dx12_instance();
-    let adapter = gpui::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-        apply_limit_buckets: false,
-    }))
-    .context("requesting a DX12 adapter")?;
+    let (_instance, adapter, device, queue) = create_device()?;
     println!("adapter: {}", adapter_summary(&adapter));
-    let (device, queue) = gpui::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("cad_viewport_offscreen"),
-        required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-        ..Default::default()
-    }))
-    .context("creating the wgpu device")?;
-    let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: wgpu::TextureFormat::Bgra8UnormSrgb,
-        width: 1,
-        height: 1,
-        present_mode: wgpu::PresentMode::Fifo,
-        desired_maximum_frame_latency: 1,
-        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-        color_space: wgpu::SurfaceColorSpace::Auto,
-        view_formats: Vec::new(),
-    };
-    let gpu = Gpu {
-        surface: None,
-        adapter,
-        device,
-        queue,
-        config,
-    };
-
     let (ui, _events) = futures::channel::mpsc::unbounded();
+    report_device_errors(&device, ui.clone());
     let started = Instant::now();
-    let mut renderer = Renderer::new(gpu, model.clone(), ui, 1, false, DisplayMode::ShadedEdges);
+    let shared = Shared::new(device, queue, surface_config());
     println!("pipelines compiled in {:?}", started.elapsed());
-    renderer.resize(WIDTH, HEIGHT);
+
+    let new_tab = |tab: TabId, scene: TabScene| {
+        let events = TabEvents {
+            tab,
+            sender: ui.clone(),
+        };
+        let started = Instant::now();
+        let mut renderer = Renderer::new(&shared, None, events, scene);
+        renderer.resize(WIDTH, HEIGHT);
+        println!("tab {tab} created in {:?}", started.elapsed());
+        renderer
+    };
+    let mut renderer = new_tab(1, TabScene::view_3d(model.clone()));
 
     let target = renderer.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
@@ -1507,7 +1729,7 @@ pub fn run_offscreen(model: Arc<Model>, out_dir: &std::path::Path) -> Result<()>
         mapped_at_creation: false,
     });
 
-    let capture = |renderer: &mut Renderer, name: &str| -> Result<()> {
+    let capture = |renderer: &mut Renderer, name: &str| -> Result<Vec<u8>> {
         renderer.advance();
         let commands = renderer.encode(&view);
         let mut encoder = renderer.device.create_command_encoder(&Default::default());
@@ -1552,11 +1774,11 @@ pub fn run_offscreen(model: Arc<Model>, out_dir: &std::path::Path) -> Result<()>
             pixels.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]),
             "{name} came out entirely black"
         );
-        image::RgbaImage::from_raw(WIDTH, HEIGHT, pixels)
+        image::RgbaImage::from_raw(WIDTH, HEIGHT, pixels.clone())
             .context("sizing the frame")?
             .save(out_dir.join(format!("{name}.png")))?;
         println!("wrote {name}.png");
-        Ok(())
+        Ok(pixels)
     };
 
     capture(&mut renderer, "iso_edges")?;
@@ -1635,28 +1857,71 @@ pub fn run_offscreen(model: Arc<Model>, out_dir: &std::path::Path) -> Result<()>
         renderer.spin = false;
     }
     capture(&mut renderer, "array_30")?;
+
+    // Tabs: several renderers on one device, each with its own content and view.
+    renderer.set_array(1);
+    renderer.camera = renderer.preset_camera(ViewPreset::Iso);
+    let assembly_before = capture(&mut renderer, "tab_assembly")?;
+    let mut part = new_tab(2, TabScene::view_3d(Arc::new(crate::scene::flange())));
+    let mut drawing = new_tab(3, TabScene::drawing(model.clone()));
+    let part_before = capture(&mut part, "tab_part")?;
+    capture(&mut drawing, "tab_drawing")?;
+
+    // Working in one tab must leave another's picture alone.
+    let part_camera = part.camera;
+    part.camera.orbit(200.0, 80.0);
+    part.selected = PartRef { assembly: 0, part: 0 }.id();
+    drawing.camera.pan(100.0, 40.0, HEIGHT as f32);
+    capture(&mut part, "tab_part_changed")?;
+    capture(&mut drawing, "tab_drawing_panned")?;
+    anyhow::ensure!(
+        capture(&mut renderer, "tab_assembly_again")? == assembly_before,
+        "a change in another tab altered this one"
+    );
+    println!("tabs are independent: the assembly tab's picture is unchanged");
+
+    // A hidden tab draws nothing, whatever it has pending, and gives up its
+    // targets; shown again it comes back with its own state.
+    part.camera = part_camera;
+    part.selected = 0;
+    part.dirty = true;
+    part.set_visible(false);
+    anyhow::ensure!(!part.wants_frame(), "a hidden tab asked for a frame");
+    anyhow::ensure!(part.msaa.is_none() && part.depth.is_none(), "a hidden tab kept its targets");
+    part.set_visible(true);
+    anyhow::ensure!(part.wants_frame(), "a tab shown again with changes asked for no frame");
+    anyhow::ensure!(
+        capture(&mut part, "tab_part_shown_again")? == part_before,
+        "hiding and showing a tab changed its picture"
+    );
+    println!("hiding works: no frames or targets while hidden, same picture when shown again");
     Ok(())
 }
 
-pub struct RenderOptions {
-    pub array: u32,
-    pub spin: bool,
-    pub mode: DisplayMode,
-}
+impl TabScene {
+    /// A model to orbit around, starting from an isometric view.
+    pub fn view_3d(model: Arc<Model>) -> Self {
+        Self {
+            model,
+            array: 1,
+            spin: false,
+            mode: DisplayMode::ShadedEdges,
+            projection: Projection::Perspective,
+            preset: ViewPreset::Iso,
+            planar: false,
+        }
+    }
 
-pub fn spawn(
-    gpu: Gpu,
-    model: Arc<Model>,
-    commands: mpsc::Receiver<Cmd>,
-    ui: UnboundedSender<UiEvent>,
-    options: RenderOptions,
-) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("wgpu-viewport".into())
-        .spawn(move || {
-            // Compiling pipelines happens here, off the UI thread.
-            let mut renderer = Renderer::new(gpu, model, ui, options.array, options.spin, options.mode);
-            renderer.run(commands);
-        })
-        .expect("spawning the render thread")
+    /// A model's plan view on a drawing sheet.
+    pub fn drawing(model: Arc<Model>) -> Self {
+        Self {
+            model,
+            array: 1,
+            spin: false,
+            mode: DisplayMode::HiddenLine,
+            projection: Projection::Orthographic,
+            preset: ViewPreset::Top,
+            planar: true,
+        }
+    }
 }

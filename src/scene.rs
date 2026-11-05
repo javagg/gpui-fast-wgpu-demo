@@ -52,6 +52,34 @@ pub struct Model {
 }
 
 impl Model {
+    fn empty() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            edge_vertices: Vec::new(),
+            meshes: Vec::new(),
+            parts: Vec::new(),
+            min: Vec3::splat(f32::MAX),
+            max: Vec3::splat(f32::MIN),
+        }
+    }
+
+    fn compute_bounds(&mut self) {
+        for part in &self.parts {
+            let mesh = &self.meshes[part.mesh];
+            for corner in 0..8 {
+                let local = Vec3::new(
+                    if corner & 1 == 0 { mesh.min.x } else { mesh.max.x },
+                    if corner & 2 == 0 { mesh.min.y } else { mesh.max.y },
+                    if corner & 4 == 0 { mesh.min.z } else { mesh.max.z },
+                );
+                let world = part.base.transform_point3(local);
+                self.min = self.min.min(world);
+                self.max = self.max.max(world);
+            }
+        }
+    }
+
     pub fn triangles_per_assembly(&self) -> u64 {
         self.parts
             .iter()
@@ -357,38 +385,7 @@ pub fn gearbox() -> Model {
     const MODULE: f32 = 4.0;
     const SEGMENTS: u32 = 96;
 
-    let mut model = Model {
-        vertices: Vec::new(),
-        indices: Vec::new(),
-        edge_vertices: Vec::new(),
-        meshes: Vec::new(),
-        parts: Vec::new(),
-        min: Vec3::splat(f32::MAX),
-        max: Vec3::splat(f32::MIN),
-    };
-    let add_mesh = |model: &mut Model, build: &dyn Fn(&mut MeshBuilder)| {
-        let mut builder = MeshBuilder::default();
-        build(&mut builder);
-        let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for vertex in &builder.vertices {
-            let pos = Vec3::from_array(vertex.pos);
-            min = min.min(pos);
-            max = max.max(pos);
-        }
-        model.meshes.push(MeshRange {
-            first_index: model.indices.len() as u32,
-            index_count: builder.indices.len() as u32,
-            base_vertex: model.vertices.len() as i32,
-            first_edge: model.edge_vertices.len() as u32,
-            edge_count: builder.edges.len() as u32,
-            min,
-            max,
-        });
-        model.vertices.extend_from_slice(&builder.vertices);
-        model.indices.extend_from_slice(&builder.indices);
-        model.edge_vertices.extend_from_slice(&builder.edges);
-        model.meshes.len() - 1
-    };
+    let mut model = Model::empty();
 
     let gear = |teeth: u32, width: f32, bore: f32, hub: f32, hub_width: f32| {
         move |mesh: &mut MeshBuilder| {
@@ -474,19 +471,7 @@ pub fn gearbox() -> Model {
     };
     let pedestal_low = add_mesh(&mut model, &pedestal(115.0));
     let pedestal_high = add_mesh(&mut model, &pedestal(164.3));
-    let bolt = add_mesh(&mut model, &|mesh: &mut MeshBuilder| {
-        let polygon: Vec<Vec3> = (0..6)
-            .map(|side| {
-                let angle = TAU * side as f32 / 6.0;
-                Vec3::new(8.5 * angle.cos(), 8.5 * angle.sin(), 0.0)
-            })
-            .collect();
-        mesh.prism(&polygon, 2.0, 9.0);
-        mesh.revolve(
-            &[(5.0, 0.0), (11.0, 0.0), (11.0, 2.0), (5.0, 2.0), (5.0, 0.0)],
-            48,
-        );
-    });
+    let bolt = add_mesh(&mut model, &bolt_mesh);
 
     // Local Z becomes world +Y for everything on a shaft.
     let on_shaft = |x: f32, y: f32, z: f32| {
@@ -590,18 +575,110 @@ pub fn gearbox() -> Model {
         part(format!("螺栓 M10-{bolt_number:02}"), bolt, oxide, facing_front(x, z), 0.0, 0.0);
     }
 
-    for part in &model.parts {
-        let mesh = &model.meshes[part.mesh];
-        for corner in 0..8 {
-            let local = Vec3::new(
-                if corner & 1 == 0 { mesh.min.x } else { mesh.max.x },
-                if corner & 2 == 0 { mesh.min.y } else { mesh.max.y },
-                if corner & 4 == 0 { mesh.min.z } else { mesh.max.z },
-            );
-            let world = part.base.transform_point3(local);
-            model.min = model.min.min(world);
-            model.max = model.max.max(world);
-        }
-    }
+    model.compute_bounds();
     model
+}
+
+/// A single part, for a tab of its own: a flanged bushing with its gasket and
+/// bolts.
+pub fn flange() -> Model {
+    const SEGMENTS: u32 = 128;
+    let mut model = Model::empty();
+    let body = add_mesh(&mut model, &|mesh: &mut MeshBuilder| {
+        mesh.revolve(
+            &[
+                (40.0, 0.0),
+                (118.0, 0.0),
+                (120.0, 2.0),
+                (120.0, 20.0),
+                (118.0, 22.0),
+                (66.0, 22.0),
+                (62.0, 30.0),
+                (62.0, 88.0),
+                (72.0, 92.0),
+                (72.0, 104.0),
+                (40.0, 104.0),
+                (40.0, 0.0),
+            ],
+            SEGMENTS,
+        );
+    });
+    let sleeve = add_mesh(&mut model, &|mesh: &mut MeshBuilder| {
+        mesh.revolve(
+            &[(30.0, -20.0), (40.0, -20.0), (40.0, 130.0), (30.0, 130.0), (30.0, -20.0)],
+            SEGMENTS,
+        );
+    });
+    let gasket = add_mesh(&mut model, &|mesh: &mut MeshBuilder| {
+        mesh.revolve(
+            &[(45.0, -4.0), (112.0, -4.0), (112.0, 0.0), (45.0, 0.0), (45.0, -4.0)],
+            SEGMENTS,
+        );
+    });
+    let bolt = add_mesh(&mut model, &bolt_mesh);
+
+    let mut part = |name: String, mesh: usize, color: u32, base: Mat4| {
+        model.parts.push(Part {
+            name,
+            mesh,
+            color: srgb(color),
+            base,
+            spin: 0.0,
+            phase: 0.0,
+        });
+    };
+    part("法兰盘".into(), body, 0x6f8fb3, Mat4::IDENTITY);
+    part("轴套".into(), sleeve, 0xc68a4a, Mat4::IDENTITY);
+    part("密封垫".into(), gasket, 0x2b2f37, Mat4::IDENTITY);
+    for index in 0..8 {
+        let angle = TAU * (index as f32 + 0.5) / 8.0;
+        part(
+            format!("螺栓 M10-{:02}", index + 1),
+            bolt,
+            0x3a3f49,
+            Mat4::from_translation(Vec3::new(95.0 * angle.cos(), 95.0 * angle.sin(), 22.0)),
+        );
+    }
+    model.compute_bounds();
+    model
+}
+
+/// Adds a mesh to the model's shared buffers and returns its index.
+fn add_mesh(model: &mut Model, build: &dyn Fn(&mut MeshBuilder)) -> usize {
+    let mut builder = MeshBuilder::default();
+    build(&mut builder);
+    let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for vertex in &builder.vertices {
+        let pos = Vec3::from_array(vertex.pos);
+        min = min.min(pos);
+        max = max.max(pos);
+    }
+    model.meshes.push(MeshRange {
+        first_index: model.indices.len() as u32,
+        index_count: builder.indices.len() as u32,
+        base_vertex: model.vertices.len() as i32,
+        first_edge: model.edge_vertices.len() as u32,
+        edge_count: builder.edges.len() as u32,
+        min,
+        max,
+    });
+    model.vertices.extend_from_slice(&builder.vertices);
+    model.indices.extend_from_slice(&builder.indices);
+    model.edge_vertices.extend_from_slice(&builder.edges);
+    model.meshes.len() - 1
+}
+
+/// A hex-headed bolt on its washer, standing on z = 0.
+fn bolt_mesh(mesh: &mut MeshBuilder) {
+    let polygon: Vec<Vec3> = (0..6)
+        .map(|side| {
+            let angle = TAU * side as f32 / 6.0;
+            Vec3::new(8.5 * angle.cos(), 8.5 * angle.sin(), 0.0)
+        })
+        .collect();
+    mesh.prism(&polygon, 2.0, 9.0);
+    mesh.revolve(
+        &[(5.0, 0.0), (11.0, 0.0), (11.0, 2.0), (5.0, 2.0), (5.0, 0.0)],
+        48,
+    );
 }

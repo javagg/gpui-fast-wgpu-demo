@@ -79,9 +79,9 @@ function Send-Key([int]$vk) {
 }
 function Get-Px([double]$logical) { [int]($logical * $scale) }
 
-# Layout, in logical pixels: toolbar 44 high, tree 214 wide, properties 248 wide.
+# Layout, in logical pixels: toolbar 44 and tabs 32 high, tree 214 and properties 248 wide.
 $c = Get-ClientSize
-$vx0 = Get-Px 214; $vx1 = $c[0] - (Get-Px 248); $vy0 = Get-Px 44; $vy1 = $c[1] - (Get-Px 24)
+$vx0 = Get-Px 214; $vx1 = $c[0] - (Get-Px 248); $vy0 = Get-Px 76; $vy1 = $c[1] - (Get-Px 24)
 $cx = [int](($vx0 + $vx1) / 2); $cy = [int](($vy0 + $vy1) / 2)
 
 switch -Wildcard ($Scenario) {
