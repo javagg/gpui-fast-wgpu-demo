@@ -4,15 +4,13 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     AnyElement, Bounds, Context, Div, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Rgba, SharedString, Stateful, Window,
-    WindowCompositionSurface, anchored, canvas, deferred, div, point, prelude::*, px, relative, rgb,
-    rgba,
+    MouseMoveEvent, MouseUpEvent, Pixels, Rgba, SharedString, Stateful, Window, anchored, canvas,
+    deferred, div, point, prelude::*, px, relative, rgb, rgba,
 };
 
 use crate::camera::Projection;
@@ -20,7 +18,33 @@ use crate::render::{
     Cmd, DisplayMode, PartRef, RenderHost, Section, Stats, TabId, TabScene, UiEvent, ViewPreset,
 };
 use crate::scene::Model;
-use crate::viewport::{Viewport, ViewportElement};
+use crate::time::{Duration, Instant};
+use crate::viewport::{SpareSurface, Viewport, ViewportElement};
+
+#[cfg(not(target_family = "wasm"))]
+const UI_FONT: &str = "Microsoft YaHei UI";
+// A page only has the fonts it loads; Chinese text falls back to the browser's.
+#[cfg(target_family = "wasm")]
+const UI_FONT: &str = "IBM Plex Sans";
+
+#[cfg(not(target_family = "wasm"))]
+const LAYERS_TITLE: &str = "一个窗口，多层表面";
+#[cfg(target_family = "wasm")]
+const LAYERS_TITLE: &str = "一张画布，一个绘制顺序";
+
+/// What the about dialog says about the layers, from the top.
+#[cfg(not(target_family = "wasm"))]
+const LAYERS: [(&str, &str); 3] = [
+    ("GPUI overlay", "deferred 绘制：HUD、菜单、这个对话框"),
+    ("wgpu 交换链（每个标签页一条）", "同一个 DX12 设备和渲染线程，只显示当前标签页"),
+    ("GPUI base", "根视图：工具栏、标签栏、面板（D3D11）"),
+];
+#[cfg(target_family = "wasm")]
+const LAYERS: [(&str, &str); 3] = [
+    ("GPUI 普通绘制", "HUD、菜单、这个对话框，都按绘制顺序盖在视口上"),
+    ("wgpu 动态纹理（每个标签页一张）", "在 Element 的 paint 里渲染，由 GPUI 当作精灵采样"),
+    ("GPUI 普通绘制", "工具栏、标签栏、面板，和视口画在同一张画布上"),
+];
 
 const PANEL: u32 = 0x1b1e24;
 const PANEL_RAISED: u32 = 0x262a32;
@@ -89,7 +113,7 @@ pub struct CadApp {
     next_tab_id: TabId,
     opened: [u32; 3],
     /// Surfaces of closed tabs, which the window can't remove.
-    spare_surfaces: Vec<WindowCompositionSurface>,
+    spare_surfaces: Vec<SpareSurface>,
 
     panels_visible: bool,
     failure: Option<SharedString>,
@@ -346,6 +370,8 @@ impl CadApp {
                 tab.viewport.commit_composition();
                 return;
             }
+            #[cfg(target_family = "wasm")]
+            UiEvent::Redraw => {}
             UiEvent::ContextMenu { window_x, window_y } => {
                 self.context_menu = Some((window_x, window_y));
             }
@@ -991,7 +1017,7 @@ impl CadApp {
                                 .text_lg()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(rgb(0xffffff))
-                                .child("一个窗口，多层表面"),
+                                .child(LAYERS_TITLE),
                         )
                         .child(
                             div()
@@ -1001,14 +1027,9 @@ impl CadApp {
                                 .text_color(rgb(TEXT_DIM))
                                 .child("这个对话框由 GPUI 绘制，后面的视口仍在由 wgpu 实时渲染。开着它按空格键试试。"),
                         )
-                        .child(layer("03", "GPUI overlay", "deferred 绘制：HUD、菜单、这个对话框", rgb(AMBER).into()))
-                        .child(layer(
-                            "02",
-                            "wgpu 交换链（每个标签页一条）",
-                            "同一个 DX12 设备和渲染线程，只显示当前标签页",
-                            rgb(ACCENT).into(),
-                        ))
-                        .child(layer("01", "GPUI base", "根视图：工具栏、标签栏、面板（D3D11）", rgb(TEXT_DIM).into()))
+                        .child(layer("03", LAYERS[0].0, LAYERS[0].1, rgb(AMBER).into()))
+                        .child(layer("02", LAYERS[1].0, LAYERS[1].1, rgb(ACCENT).into()))
+                        .child(layer("01", LAYERS[2].0, LAYERS[2].1, rgb(TEXT_DIM).into()))
                         .child(
                             div().mt_4().flex().justify_end().child(
                                 tool_button("dialog-close", "关闭", true).on_click(cx.listener(|this, _, _, cx| {
@@ -1093,7 +1114,7 @@ impl Render for CadApp {
             .flex()
             .flex_col()
             .size_full()
-            .font_family("Microsoft YaHei UI")
+            .font_family(UI_FONT)
             .bg(rgb(PANEL))
             .text_color(rgb(TEXT))
             .child(toolbar)

@@ -1,0 +1,2 @@
+# git apply needs these with the line endings git diff gave them.
+*.patch -text

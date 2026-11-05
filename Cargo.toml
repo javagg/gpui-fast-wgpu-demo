@@ -21,7 +21,15 @@ anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
 futures = "0.3"
 glam = { version = "0.30", features = ["bytemuck"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+gpui_web = { path = "vendor/gpui-fast/crates/gpui_web", default-features = false }
+gpui_wgpu = { path = "vendor/gpui-fast/crates/gpui_wgpu" }
+wasm-bindgen = "0.2"
+web-time = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Must be the version gpui_windows uses: the native surface handle is handed

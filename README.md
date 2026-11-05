@@ -1,7 +1,7 @@
 # cad_viewport
 
 A custom GPUI `Element` whose content is rendered directly by wgpu, with GPUI's
-own menus and dialogs above it. It uses gpui-fast's public API only.
+own menus and dialogs above it. On the desktop it uses gpui-fast's public API only.
 
 ```text
 front  GPUI overlay     deferred draws: HUD, menus, dialogs
@@ -24,6 +24,37 @@ target\release\cad_viewport.exe --offscreen out     (no window: PNGs, picking, f
 
 `tools\run_test.cmd` runs a scripted session and saves screenshots and
 measurements to `test-output`.
+
+## In a browser
+
+The same UI, tabs and renderer also run as WebAssembly, on a different path to the
+screen. A page has no window composition and an opaque canvas, but GPUI's renderer
+there is wgpu itself, so `src/viewport_web.rs` draws during `Element::paint` into a
+`WgpuDynamicTexture` on GPUI's own device and paints it as a sprite. The viewport
+then takes part in GPUI's painter order like any other element.
+
+```powershell
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.130
+tools\build_web.ps1    # builds web\dist
+tools\serve_web.ps1    # serves it at http://localhost:8765/
+```
+
+The `wasm-bindgen` command line must match the `wasm-bindgen` crate in `Cargo.lock`.
+`tools\test_web.ps1` drives the page in headless Edge; add `-Software` where no GPU
+process is available, which also means WebGL2 rather than WebGPU.
+
+This needs `WebPlatform::wgpu_context`, which gpui-fast doesn't have yet (see
+`docs/upstream-issues.md`), so `tools\build_web.ps1` applies
+`patches\gpui-fast-web-wgpu-context.patch` to the submodule, and git then shows the
+submodule as modified.
+
+Rendering has been seen working with WebGPU on a real GPU, and with WebGL2 in
+software. Differences from the desktop version:
+
+- Everything runs on the page's main thread, so a slow frame delays the UI too.
+- Clicking and hovering don't pick parts, because a page can't wait for a readback.
+  The assembly tree still selects them.
 
 ## Tabs
 
@@ -55,14 +86,11 @@ Windows backend, not a documented guarantee.
 
 ## Building
 
-This machine's network fails cargo's TLS revocation checks, so the first build
-was made against a local copy of the crates, in `..\.cargo-home`:
+gpui-fast is a submodule in `vendor\gpui-fast`, so clone with submodules, or run
+`git submodule update --init` in an existing clone:
 
 ```powershell
-$env:CARGO_HOME = "D:\workspaces\dev9\works\gpwgpu\.cargo-home"
+git clone --recurse-submodules https://github.com/javagg/gpui-fast-wgpu-demo.git
+cd gpui-fast-wgpu-demo
 cargo build --release
 ```
-
-Elsewhere a plain `cargo build --release` should do. gpui-fast is a submodule
-in `vendor\gpui-fast`, so clone with `git clone --recurse-submodules`, or run
-`git submodule update --init` in an existing clone.

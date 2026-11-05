@@ -1,0 +1,46 @@
+diff --git a/crates/gpui_web/src/fast/mod.rs b/crates/gpui_web/src/fast/mod.rs
+new file mode 100644
+index 0000000..3eab2f7
+--- /dev/null
++++ b/crates/gpui_web/src/fast/mod.rs
+@@ -0,0 +1,14 @@
++//! gpui-fast's additions to the web platform.
++
++use gpui_wgpu::WgpuContext;
++
++use crate::WebPlatform;
++
++impl WebPlatform {
++    /// The context drawing this platform's window, once graphics have been
++    /// initialized: from the moment the application finishes launching. Lets
++    /// an application allocate a `WgpuDynamicTexture` that GPUI can sample.
++    pub fn wgpu_context(&self) -> Option<WgpuContext> {
++        self.wgpu_context.borrow().clone()
++    }
++}
+diff --git a/crates/gpui_web/src/gpui_web.rs b/crates/gpui_web/src/gpui_web.rs
+index c915084..4276bf5 100644
+--- a/crates/gpui_web/src/gpui_web.rs
++++ b/crates/gpui_web/src/gpui_web.rs
+@@ -7,6 +7,8 @@ pub mod canvas_fallback;
+ 
+ pub use canvas_fallback::CanvasFontFallback;
+ 
++#[cfg(target_family = "wasm")]
++mod fast;
+ #[cfg(target_family = "wasm")]
+ mod canvas_text;
+ #[cfg(target_family = "wasm")]
+diff --git a/crates/gpui_web/src/platform.rs b/crates/gpui_web/src/platform.rs
+index b496aa4..3e06390 100644
+--- a/crates/gpui_web/src/platform.rs
++++ b/crates/gpui_web/src/platform.rs
+@@ -39,7 +39,7 @@ pub struct WebPlatform {
+     active_display: Rc<dyn PlatformDisplay>,
+     callbacks: RefCell<WebPlatformCallbacks>,
+     backend_preference: WebBackendPreference,
+-    wgpu_context: Rc<RefCell<Option<WgpuContext>>>,
++    pub(crate) wgpu_context: Rc<RefCell<Option<WgpuContext>>>,
+     prepared_window: Rc<RefCell<Option<PreparedWebWindow>>>,
+     window_lifecycle: Rc<Cell<WebWindowLifecycle>>,
+     cursor_visible: Rc<Cell<bool>>,

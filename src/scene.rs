@@ -16,7 +16,6 @@ pub struct Vertex {
 pub struct MeshRange {
     pub first_index: u32,
     pub index_count: u32,
-    pub base_vertex: i32,
     pub first_edge: u32,
     pub edge_count: u32,
     pub min: Vec3,
@@ -653,17 +652,19 @@ fn add_mesh(model: &mut Model, build: &dyn Fn(&mut MeshBuilder)) -> usize {
         min = min.min(pos);
         max = max.max(pos);
     }
+    // Indices are absolute rather than relative to a base vertex, which WebGL2
+    // can't draw with.
+    let base_vertex = model.vertices.len() as u32;
     model.meshes.push(MeshRange {
         first_index: model.indices.len() as u32,
         index_count: builder.indices.len() as u32,
-        base_vertex: model.vertices.len() as i32,
         first_edge: model.edge_vertices.len() as u32,
         edge_count: builder.edges.len() as u32,
         min,
         max,
     });
     model.vertices.extend_from_slice(&builder.vertices);
-    model.indices.extend_from_slice(&builder.indices);
+    model.indices.extend(builder.indices.iter().map(|index| index + base_vertex));
     model.edge_vertices.extend_from_slice(&builder.edges);
     model.meshes.len() - 1
 }

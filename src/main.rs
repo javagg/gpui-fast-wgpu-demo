@@ -6,29 +6,54 @@
 //! cargo run --release -- --array 30 --spin --mode edges --exit-after 10
 //! cargo run --release -- --offscreen out   # no window: PNGs, picking, frame times
 //! ```
+//!
+//! In a browser the same UI, tabs and renderer run on GPUI's own wgpu context,
+//! through `src/viewport_web.rs`; see `tools/build_web.ps1`.
 
-#[cfg(not(target_os = "windows"))]
+#![cfg_attr(target_family = "wasm", no_main)]
+// Parts of the renderer only the desktop's render thread uses.
+#![cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
+
+#[cfg(not(any(target_os = "windows", target_family = "wasm")))]
 fn main() {
     eprintln!(
-        "This demo attaches wgpu to a DirectComposition visual, so it runs on Windows. \
+        "This demo attaches wgpu to a DirectComposition visual on Windows, and runs in a browser. \
          gpui-fast's native_webview example shows the Linux surface handle."
     );
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_family = "wasm"))]
 mod camera;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_family = "wasm"))]
 mod render;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_family = "wasm"))]
 mod scene;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_family = "wasm"))]
 mod ui;
 #[cfg(target_os = "windows")]
 mod viewport;
+#[cfg(target_family = "wasm")]
+#[path = "viewport_web.rs"]
+mod viewport;
+
+/// `std::time::Instant` panics in a browser.
+#[cfg(any(target_os = "windows", target_family = "wasm"))]
+mod time {
+    #[cfg(not(target_family = "wasm"))]
+    pub use std::time::{Duration, Instant};
+    #[cfg(target_family = "wasm")]
+    pub use web_time::{Duration, Instant};
+}
 
 #[cfg(target_os = "windows")]
 fn main() {
     app::run();
+}
+
+#[cfg(target_family = "wasm")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn start() {
+    viewport::run();
 }
 
 #[cfg(target_os = "windows")]

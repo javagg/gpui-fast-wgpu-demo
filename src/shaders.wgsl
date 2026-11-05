@@ -33,6 +33,17 @@ fn cut_away(world: vec3<f32>) -> bool {
     return g.ids.w != 0u && dot(world, g.section.xyz) > g.section.w;
 }
 
+// Encodes a linear color for a target that doesn't do it itself.
+fn to_target(linear: vec3<f32>) -> vec3<f32> {
+    if (g.grid.w < 0.5) {
+        return linear;
+    }
+    let color = clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0));
+    let low = color * 12.92;
+    let high = 1.055 * pow(color, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(high, low, color <= vec3<f32>(0.0031308));
+}
+
 // ---------------------------------------------------------------- background
 
 struct BackgroundOut {
@@ -53,7 +64,7 @@ fn vs_background(@builtin(vertex_index) index: u32) -> BackgroundOut {
 fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
     let bottom = vec3<f32>(0.020, 0.024, 0.032);
     let top = vec3<f32>(0.060, 0.072, 0.095);
-    return vec4<f32>(mix(bottom, top, in.v), 1.0);
+    return vec4<f32>(to_target(mix(bottom, top, in.v)), 1.0);
 }
 
 // -------------------------------------------------------------------- solids
@@ -92,10 +103,10 @@ fn fs_solid(in: SolidOut, @builtin(front_facing) front: bool) -> @location(0) ve
     // solid: hatch it, as a section view does.
     if (!front && g.ids.w != 0u) {
         let stripe = step(0.5, fract((in.clip.x + in.clip.y) / 10.0));
-        return vec4<f32>(mix(vec3<f32>(0.50, 0.075, 0.05), vec3<f32>(0.80, 0.16, 0.09), stripe), 1.0);
+        return vec4<f32>(to_target(mix(vec3<f32>(0.50, 0.075, 0.05), vec3<f32>(0.80, 0.16, 0.09), stripe)), 1.0);
     }
     if (g.ids.z == MODE_HIDDEN_LINE) {
-        return vec4<f32>(BLUEPRINT_FILL, 1.0);
+        return vec4<f32>(to_target(BLUEPRINT_FILL), 1.0);
     }
 
     var n = normalize(in.normal);
@@ -122,7 +133,7 @@ fn fs_solid(in: SolidOut, @builtin(front_facing) front: bool) -> @location(0) ve
     } else if (in.id == g.ids.x) {
         color = mix(color, HOVER_TINT, 0.40);
     }
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(to_target(color), 1.0);
 }
 
 // ------------------------------------------------------------- feature edges
@@ -158,7 +169,7 @@ fn fs_edge(in: EdgeOut) -> @location(0) vec4<f32> {
     } else if (in.id == g.ids.x) {
         color = HOVER_TINT;
     }
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(to_target(color), 1.0);
 }
 
 // ------------------------------------------------------- grid and axis triad
@@ -184,7 +195,7 @@ fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
     if (g.grid.x > 0.0) {
         alpha *= 1.0 - smoothstep(g.grid.x * 0.45, g.grid.x, length(in.world.xy - g.grid.yz));
     }
-    return vec4<f32>(in.color.rgb, alpha);
+    return vec4<f32>(to_target(in.color.rgb), alpha);
 }
 
 // -------------------------------------------------------------------- picking

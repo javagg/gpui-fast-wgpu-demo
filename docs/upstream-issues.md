@@ -50,3 +50,28 @@ relies on, but that is an implementation detail.
 
 **Possible fix.** Add a documented way to request a commit, or have the attachment commit
 when asked to bind external content.
+
+## 3. A stock web application can't use `WgpuDynamicTexture`
+
+`WgpuDynamicTexture` has to be allocated from the context drawing the window, and
+`WebPlatform` keeps that context private, as the commit that added the type (#99) says.
+So the feature is out of reach unless the application replaces the platform.
+
+**Proposed change.** A public accessor, about three lines plus hooks. It lives in
+`patches/gpui-fast-web-wgpu-context.patch`, which `tools/build_web.ps1` applies to the
+submodule, and is written to the fork's conventions: `crates/gpui_web/src/fast/mod.rs`,
+with `mod fast;` in `gpui_web.rs` and `pub(crate)` on the field in `platform.rs`.
+
+```rust
+impl WebPlatform {
+    pub fn wgpu_context(&self) -> Option<WgpuContext> {
+        self.wgpu_context.borrow().clone()
+    }
+}
+```
+
+The fork's rules forbid new public API without listing it in `docs/upstream-sync.md`, so a
+pull request would add it to that list, and should run `script/check-upstream`.
+
+With this, a custom element renders during `paint` on GPUI's device and everything else
+draws over it, which `src/viewport_web.rs` shows working.

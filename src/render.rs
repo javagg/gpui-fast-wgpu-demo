@@ -7,8 +7,8 @@
 
 use std::num::NonZeroU64;
 use std::sync::{Arc, mpsc};
+#[cfg(not(target_family = "wasm"))]
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -17,6 +17,7 @@ use glam::{Mat4, Vec3};
 
 use crate::camera::{Camera, Glide, Projection};
 use crate::scene::{Model, Vertex};
+use crate::time::{Duration, Instant};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const PICK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
@@ -179,10 +180,15 @@ pub enum UiEvent {
     /// The swap chain was configured and has now presented, so the composition
     /// has to be committed for it to appear.
     CommitComposition,
+    /// In a browser, where the viewport draws as GPUI paints: it has something
+    /// new to show, so GPUI should paint again.
+    #[cfg(target_family = "wasm")]
+    Redraw,
 }
 
 /// The UI thread's side of the renderer: the device every tab's surface is
 /// created on, and the channel to the render thread.
+#[cfg(not(target_family = "wasm"))]
 pub struct RenderHost {
     instance: wgpu::Instance,
     device: wgpu::Device,
@@ -192,6 +198,7 @@ pub struct RenderHost {
     pub adapter: String,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl RenderHost {
     pub fn new(ui: UnboundedSender<(TabId, UiEvent)>) -> Result<Self> {
         let (instance, adapter, device, queue) = create_device()?;
@@ -246,6 +253,7 @@ impl RenderHost {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Drop for RenderHost {
     fn drop(&mut self) {
         self.send(Msg::Shutdown);
@@ -255,6 +263,7 @@ impl Drop for RenderHost {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn create_device() -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::DX12,
@@ -296,6 +305,7 @@ fn surface_config() -> wgpu::SurfaceConfiguration {
 }
 
 /// wgpu's default handler panics, which would silently end the render thread.
+#[cfg(not(target_family = "wasm"))]
 fn report_device_errors(device: &wgpu::Device, ui: UnboundedSender<(TabId, UiEvent)>) {
     device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
         eprintln!("wgpu error: {error}");
@@ -1282,7 +1292,14 @@ impl Renderer {
             eye: [eye.x, eye.y, eye.z, 1.0],
             forward: [forward.x, forward.y, forward.z, if orthographic { 1.0 } else { 0.0 }],
             section,
-            grid: [self.grid_radius, self.grid_center.0, self.grid_center.1, 0.0],
+            grid: [
+                self.grid_radius,
+                self.grid_center.0,
+                self.grid_center.1,
+                // Shaders write linear colors; a target that isn't sRGB, like
+                // GPUI's sprite textures, needs them encoded first.
+                if self.config.format.has_srgb_suffix() { 0.0 } else { 1.0 },
+            ],
             ids: [
                 self.hovered,
                 self.selected,
@@ -1363,6 +1380,10 @@ impl Renderer {
             self.ui.unbounded_send(UiEvent::CommitComposition).ok();
         }
 
+        self.note_frame(encode_seconds);
+    }
+
+    fn note_frame(&mut self, encode_seconds: f32) {
         self.dirty = false;
         self.frames_total += 1;
         self.frames_since_report += 1;
@@ -1385,7 +1406,7 @@ impl Renderer {
         let rotation = Mat4::from_mat3(glam::Mat3::from_mat4(self.camera.view()));
         let triad = Mat4::orthographic_rh(-1.25, 1.25, -1.25, 1.25, 4.0, -4.0) * rotation;
         let mut triad_globals = self.globals(triad);
-        triad_globals.grid = [0.0; 4];
+        triad_globals.grid[0] = 0.0;
         self.queue.write_buffer(
             &self.triad_uniforms.buffer,
             0,
@@ -1431,7 +1452,7 @@ impl Renderer {
                 let mesh = &self.model.meshes[draw.mesh];
                 pass.draw_indexed(
                     mesh.first_index..mesh.first_index + mesh.index_count,
-                    mesh.base_vertex,
+                    0,
                     draw.first_instance..draw.first_instance + draw.instance_count,
                 );
             }
@@ -1466,7 +1487,15 @@ impl Renderer {
         encoder.finish()
     }
 
+    /// A browser can't wait for a readback on its main thread, so picking there
+    /// would have to finish in a later frame. Not done yet.
+    #[cfg(target_family = "wasm")]
+    fn pick(&mut self, _x: f32, _y: f32) -> u32 {
+        0
+    }
+
     /// Renders one pixel of part ids and reads it back.
+    #[cfg(not(target_family = "wasm"))]
     fn pick(&mut self, x: f32, y: f32) -> u32 {
         let (width, height) = (self.config.width.max(1) as f32, self.config.height.max(1) as f32);
         let ndc_x = 2.0 * (x.floor() + 0.5) / width - 1.0;
@@ -1516,7 +1545,7 @@ impl Renderer {
                 let mesh = &self.model.meshes[draw.mesh];
                 pass.draw_indexed(
                     mesh.first_index..mesh.first_index + mesh.index_count,
-                    mesh.base_vertex,
+                    0,
                     draw.first_instance..draw.first_instance + draw.instance_count,
                 );
             }
@@ -1595,6 +1624,75 @@ impl Renderer {
     }
 }
 
+/// The browser's side of the renderer. A page has no thread to give it, so each
+/// tab draws on the main thread as GPUI paints, on the device GPUI itself uses.
+#[cfg(target_family = "wasm")]
+pub struct RenderHost {
+    shared: Shared,
+    ui: UnboundedSender<(TabId, UiEvent)>,
+    pub context: gpui_wgpu::WgpuContext,
+    pub adapter: String,
+}
+
+#[cfg(target_family = "wasm")]
+impl RenderHost {
+    pub fn new(context: gpui_wgpu::WgpuContext, ui: UnboundedSender<(TabId, UiEvent)>) -> Self {
+        let mut config = surface_config();
+        // What a `WgpuDynamicTexture` is allocated with.
+        config.format = context.color_texture_format();
+        let shared = Shared::new((*context.device).clone(), (*context.queue).clone(), config);
+        let adapter = adapter_summary(&context.adapter);
+        Self {
+            shared,
+            ui,
+            context,
+            adapter,
+        }
+    }
+
+    pub fn ui_sender(&self) -> UnboundedSender<(TabId, UiEvent)> {
+        self.ui.clone()
+    }
+
+    pub fn new_tab(&self, tab: TabId, scene: TabScene) -> TabRenderer {
+        let events = TabEvents {
+            tab,
+            sender: self.ui.clone(),
+        };
+        TabRenderer(Renderer::new(&self.shared, None, events, scene))
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub struct TabRenderer(Renderer);
+
+#[cfg(target_family = "wasm")]
+impl TabRenderer {
+    pub fn apply(&mut self, cmd: Cmd) {
+        self.0.apply(cmd);
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.0.resize(width, height);
+    }
+
+    pub fn wants_frame(&self) -> bool {
+        self.0.wants_frame()
+    }
+
+    /// Draws a frame into `target`, submitting it before returning.
+    pub fn draw(&mut self, target: &wgpu::TextureView) {
+        let renderer = &mut self.0;
+        let started = renderer.advance();
+        let commands = renderer.encode(target);
+        renderer.queue.submit([commands]);
+        renderer.note_frame(started.elapsed().as_secs_f32());
+        let idle = !renderer.wants_frame();
+        renderer.report(idle);
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn render_thread(
     shared: Shared,
     commands: mpsc::Receiver<Msg>,
@@ -1659,6 +1757,7 @@ fn render_thread(
 /// Checks the renderer without a window, which is all a process outside the
 /// interactive desktop session can do: draws known views to PNG files, tests
 /// picking and measures how long frames take with nothing limiting them.
+#[cfg(not(target_family = "wasm"))]
 pub fn run_offscreen(model: Arc<Model>, out_dir: &std::path::Path) -> Result<()> {
     const WIDTH: u32 = 1280;
     const HEIGHT: u32 = 800;

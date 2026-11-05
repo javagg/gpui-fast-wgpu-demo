@@ -27,6 +27,9 @@ use windows::core::{IUnknown, Interface as _};
 
 use crate::render::{Button, Cmd, Msg, Pointer, PointerKind, RenderHost, TabId, TabScene};
 
+/// What a closed tab leaves behind for the next one to use.
+pub type SpareSurface = WindowCompositionSurface;
+
 /// One tab's viewport: its native surface in the window and its renderer on
 /// the render thread. Every tab has its own, on the one wgpu device.
 pub struct Viewport {

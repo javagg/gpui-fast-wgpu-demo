@@ -1,7 +1,7 @@
 //! A Z-up turntable camera with reversed-Z projections.
 
 use glam::{Mat4, Vec3};
-use std::time::{Duration, Instant};
+use crate::time::{Duration, Instant};
 
 const FOV_Y: f32 = 35f32.to_radians();
 
