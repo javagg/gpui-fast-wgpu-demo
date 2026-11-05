@@ -58,6 +58,9 @@ mod viewport;
 #[cfg(target_family = "wasm")]
 #[path = "viewport_web.rs"]
 mod viewport;
+/// The element and input forwarding the two desktop viewports share.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod viewport_element;
 
 /// `std::time::Instant` panics in a browser.
 #[cfg(any(
