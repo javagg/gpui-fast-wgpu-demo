@@ -268,6 +268,31 @@ impl RenderHost {
         surface.configure(&self.device, &self.config);
         Ok(surface)
     }
+
+    /// Creates a tab's surface on Linux, where GPUI's native surface is an X11
+    /// child window or a Wayland sub-surface and wgpu presents to it with a
+    /// swap chain of its own. The display connection comes from the window:
+    /// with the Vulkan backend an instance reaches a display per surface, so
+    /// `InstanceDescriptor::display` stays empty.
+    #[cfg(target_os = "linux")]
+    pub fn create_surface(
+        &self,
+        display: raw_window_handle::RawDisplayHandle,
+        window: raw_window_handle::RawWindowHandle,
+    ) -> Result<wgpu::Surface<'static>> {
+        // SAFETY: the native surface outlives this surface, which the viewport
+        // drops before the composition surface it was made from.
+        let surface = unsafe {
+            self.instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: Some(display),
+                    raw_window_handle: window,
+                })
+        }
+        .context("creating a wgpu surface on the native surface")?;
+        surface.configure(&self.device, &self.config);
+        Ok(surface)
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -287,6 +312,8 @@ fn create_device() -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu:
     const BACKENDS: wgpu::Backends = wgpu::Backends::DX12;
     #[cfg(target_os = "macos")]
     const BACKENDS: wgpu::Backends = wgpu::Backends::METAL;
+    #[cfg(target_os = "linux")]
+    const BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: BACKENDS,
         flags: wgpu::InstanceFlags::default(),
@@ -311,6 +338,12 @@ fn create_device() -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu:
 }
 
 fn surface_config() -> wgpu::SurfaceConfiguration {
+    // An X11 or Wayland surface offers no opaque alpha mode, so let wgpu take
+    // the first one the surface supports; DX12 and Metal support the opaque one.
+    #[cfg(target_os = "linux")]
+    let alpha_mode = wgpu::CompositeAlphaMode::Auto;
+    #[cfg(not(target_os = "linux"))]
+    let alpha_mode = wgpu::CompositeAlphaMode::Opaque;
     wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         // wgpu's DX12 backend offers this on every surface.
@@ -320,7 +353,7 @@ fn surface_config() -> wgpu::SurfaceConfiguration {
         // vsync blocks only the render thread.
         present_mode: wgpu::PresentMode::Fifo,
         desired_maximum_frame_latency: 1,
-        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+        alpha_mode,
         color_space: wgpu::SurfaceColorSpace::Auto,
         view_formats: Vec::new(),
     }

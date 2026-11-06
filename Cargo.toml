@@ -38,6 +38,16 @@ web-time = "1"
 # `CAMetalLayer` for wgpu to render into.
 objc2 = "0.6"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Must be the version gpui uses: the native surface handle is a
+# `RawWindowHandle`, and the viewport hands it to wgpu with the window's
+# display connection.
+raw-window-handle = "0.6"
+# gpui-fast turns gpui_linux's features off, so without these the Linux build
+# gets the headless platform: it lays out and takes input, but has no display
+# and no window composition.
+gpui_platform = { path = "vendor/gpui-fast/crates/gpui_platform", default-features = false, features = ["x11", "wayland"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # Must be the version gpui_windows uses: the native surface handle is handed
 # out as this crate's `IUnknown` and recovered with `Any::downcast`.

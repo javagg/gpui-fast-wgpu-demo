@@ -76,6 +76,67 @@ is also why a hidden tab costs nothing.
 Measured on an M1 Max at 1796x1522 with MSAA 4x: 104 fps in the viewport, and
 `--offscreen` reports 5.7 ms per frame for 5,378,000 triangles in a 10x10 array.
 
+## On Linux
+
+The desktop path also builds and runs here: the same UI, tabs, picking and
+render thread, with `src/viewport_linux.rs` in place of `src/viewport.rs`.
+
+```text
+cargo run --release -- --spin --array 30 --exit-after 14
+cargo run --release -- --offscreen out
+```
+
+gpui-fast's Linux native surface is an X11 child window or a Wayland
+sub-surface, whose handle `platform_surface` returns as a `RawWindowHandle`.
+The viewport passes that and the window's display connection to wgpu, which
+builds a Vulkan swap chain on it and presents by itself: as on macOS there is
+nothing to commit, and `set_visible` maps or detaches the surface instead of
+the empty-bounds workaround. GPUI's Linux renderer is wgpu too, so the
+viewport's device is a second one next to GPUI's, as on Windows it is a DX12
+device next to the D3D11 one.
+
+Two things this path needs that the other platforms don't:
+
+- The `x11` and `wayland` features of `gpui_platform`. gpui-fast builds
+  `gpui_linux` with `default-features = false`, so without them the Linux
+  binary runs GPUI's headless platform: it lays out and takes input, opens a
+  window, and then refuses composition with
+  `window composition is not supported on this platform`.
+- `CompositeAlphaMode::Auto` rather than `Opaque`. An X11 or Wayland surface
+  offers only `PreMultiplied` and `Inherit`, and `Surface::configure` fails
+  the request instead of picking one. The content stays opaque because the
+  renderer clears with `wgpu::Color::BLACK`, whose alpha is one; only the
+  ground grid's fade-out edge would blend with what is behind it, and only
+  under a compositor.
+
+The build needs the usual display and text libraries:
+
+```text
+apt-get install build-essential pkg-config curl git libssl-dev libasound2-dev \
+  libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev \
+  libx11-xcb-dev libxcb1-dev libxcb-render-util0-dev libxcb-shape0-dev \
+  libxcb-xfixes0-dev libwayland-dev libxdo-dev fonts-noto-cjk
+```
+
+Both paths have been run in an OrbStack arm64 container, where no GPU is
+available and `mesa-vulkan-drivers` supplies the only Vulkan device:
+
+```text
+adapter: llvmpipe (LLVM 20.1.2, 128 bits) (Vulkan)
+array 1x1: 82.9 ms per frame; 10x10: 1256 ms; 30x30: 14836 ms
+window, 898x760, array 3x3: 4.3 fps, 102 frames in 24 s
+```
+
+Those are debug-build software-rasterized numbers, so they say nothing about
+speed — what they showed is that the frames, the picking reads and the tab
+independence come out the same as on Metal: of the fifteen PNGs, eleven differ
+from the macOS run in about one percent of pixels, and the other four, the
+densest ones, differ along edges and inside the geometry, where the two
+rasterizers antialias differently. Nothing moved: an amplified difference
+shows no doubled or offset edge anywhere. In the window GPUI's overlay paints
+above the viewport as it does elsewhere, which is what the native surface is
+for.
+
 ## In a browser
 
 The same UI, tabs and renderer also run as WebAssembly, on a different path to the
