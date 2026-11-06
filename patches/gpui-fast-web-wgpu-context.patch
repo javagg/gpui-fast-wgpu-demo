@@ -1,9 +1,52 @@
 diff --git a/crates/gpui_web/src/fast/mod.rs b/crates/gpui_web/src/fast/mod.rs
 new file mode 100644
 index 0000000..0000000
+--- /dev/null
++++ b/crates/gpui_web/src/fast/mod.rs
+@@ -0,0 +1,9 @@
++//! Everything gpui-fast adds to the web platform lives under this module.
++//!
++//! The rest of this crate is kept as close to upstream GPUI (Zed's
++//! `crates/gpui_web`) as possible, so that pulling in upstream changes stays
++//! a matter of merging rather than of rewriting. Upstream files only *call
++//! into* this module: a field this module reads, a line forwarding a call to
++//! it. The logic itself is written here, one file per topic.
++
++pub(crate) mod wgpu_context;
 diff --git a/crates/gpui_web/src/fast/wgpu_context.rs b/crates/gpui_web/src/fast/wgpu_context.rs
 new file mode 100644
 index 0000000..0000000
+--- /dev/null
++++ b/crates/gpui_web/src/fast/wgpu_context.rs
+@@ -0,0 +1,28 @@
++//! The context that draws a web window, for applications that render with
++//! wgpu themselves.
++//!
++//! A page has no window composition, so an element whose content wgpu draws
++//! can only reach the screen as a texture GPUI samples: the element draws
++//! during `paint` into a `WgpuDynamicTexture`, and GPUI paints it as a sprite
++//! like any other. Such a texture has to be allocated from the context
++//! drawing the window that shows it, and `WebPlatform` is what holds that
++//! context, so reaching it is the whole of this module.
++
++use gpui_wgpu::WgpuContext;
++
++use crate::WebPlatform;
++
++impl WebPlatform {
++    /// The context drawing this platform's window, once graphics have been
++    /// initialized: from the moment the application finishes launching. An
++    /// application that renders with wgpu allocates its dynamic textures from
++    /// here, so GPUI can sample what it drew.
++    ///
++    /// The web helpers in `gpui_platform` build a platform without handing it
++    /// back, so reaching this takes an application that constructs
++    /// `WebPlatform` itself and keeps the `Rc` it gives to
++    /// `Application::with_platform`.
++    pub fn wgpu_context(&self) -> Option<WgpuContext> {
++        self.wgpu_context.borrow().clone()
++    }
++}
 diff --git a/crates/gpui_web/src/gpui_web.rs b/crates/gpui_web/src/gpui_web.rs
 index 0000000..0000000
 --- a/crates/gpui_web/src/gpui_web.rs
@@ -34,16 +77,17 @@ diff --git a/docs/upstream-sync.md b/docs/upstream-sync.md
 index 0000000..0000000
 --- a/docs/upstream-sync.md
 +++ b/docs/upstream-sync.md
-@@ -69,6 +69,14 @@
+@@ -69,6 +69,15 @@
     `fast::dynamic_textures` exception. Everything else is `pub(crate)`, and the
     module adds no rendering behavior an app could observe without calling the
     new methods.
-+   A second exception is `gpui_web`'s `fast::wgpu_context`
-+   (longbridge/gpui-fast#99): a browser page has no window composition, so a
-+   wgpu-rendered element there can only reach the screen by drawing during
-+   `paint` into a `WgpuDynamicTexture` allocated from the context that draws
-+   the window. `WebPlatform` keeps that context private, which leaves the
-+   feature unreachable to an application that does not replace the platform.
++   A second exception is `WebPlatform::wgpu_context()` (in
++   `gpui_web::fast::wgpu_context`, longbridge/gpui-fast#102): a browser page has
++   no window composition, so a wgpu-rendered element there can only reach the
++   screen by drawing during `paint` into a `WgpuDynamicTexture` allocated from
++   the context that draws the window. `WebPlatform` kept that context private,
++   which left the feature unreachable to an application that does not replace
++   the platform.
 +   The addition is one accessor returning a clone of the `Rc` it already
 +   holds, and nothing else about the web platform becomes public.
  6. **New files only inside `fast/`, or in our own crates** such as

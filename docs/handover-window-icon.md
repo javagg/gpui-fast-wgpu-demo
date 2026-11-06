@@ -9,7 +9,7 @@ to a working tree.
 | --- | --- | --- |
 | zed-industries/zed | [#66603](https://github.com/zed-industries/zed/pull/66603) | open, mergeable, 2 commits, 2 files, +259/−2 |
 | javagg/zed | `gpui-windows-window-icon` | the PR's head branch |
-| longbridge/gpui-fast | [#102](https://github.com/longbridge/gpui-fast/pull/102) | open, mergeable: the web `wgpu_context` accessor |
+| longbridge/gpui-fast | [#102](https://github.com/longbridge/gpui-fast/pull/102) | open, mergeable, 2 commits: reviewed, nits taken |
 | this repository | `main` | macOS port, shared viewport element, these docs |
 
 #66603 commits: `22ba5a8a` adds the fix, `6bf885f9` answers Copilot's review by
@@ -74,6 +74,29 @@ object count in Task Manager; it should not climb, which is the `Drop` path.
 > type-check against `x86_64-pc-windows-msvc` with `windows` 0.62.2, and that
 > the four packing tests pass. Every Win32 signature used was read out of the
 > `windows` 0.62.2 source rather than assumed.
+
+## gpui-fast #102, the web accessor
+
+Reviewed by @huacnlee (three nits) and by Copilot (three comments). `25bbf8c`
+takes the two that were real: the rule 5 exception now names
+`WebPlatform::wgpu_context()` and cites #102 rather than #99, and the accessor's
+own comment now says the web helpers in `gpui_platform` build a platform without
+handing it back.
+
+Two suggestions were declined on the thread, with reasons. Keeping the field
+private and moving the `impl` into `platform.rs` would put gpui-fast code in an
+upstream file, against rules 1 and 2 - and the reviewer's own nit 3 accepted the
+visibility bump. Gating `mod fast` on `test` as well as wasm cannot work:
+`WebPlatform` lives in `platform`, which `gpui_web.rs:28` compiles only under
+`target_family = "wasm"`, and `gpui_wgpu` is a wasm-target dependency, so a host
+test build would fail to resolve both names rather than catch anything.
+
+Left open for the maintainers: whether `gpui_platform` should return the
+`Rc<WebPlatform>` its three web constructors build, so an application does not
+have to construct the platform itself. Wider than this accessor, so it was not
+grown into this PR. This repository is one consumer of the current setup -
+`src/viewport_web.rs:270` builds the platform, keeps a second `Rc`, and calls the
+accessor from `Element::paint`.
 
 ## macOS: there is nothing to fix, and that is worth knowing
 
